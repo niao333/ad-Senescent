@@ -1,262 +1,188 @@
+# =============================================================================
+# Single-cell communication analysis (Seurat + CellChat)
+# For human AD dataset, comparing normal vs. senescent cell types
+# Place input files in working directory before running
+# =============================================================================
+
 library(Seurat)
 library(CellChat)
 library(Matrix)
-library(stringr) 
+library(stringr)
 library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(ggpubr)
 
-seurat_obj <- readRDS("~/fanxiu_0212/anno_data_0212.rds")
+# ----------------------------- Data preparation ------------------------------
+# Read annotated Seurat object
+seurat_obj <- readRDS("anno_data_0212.rds")
 
+# Subset AD samples
 ad_data <- subset(seurat_obj, subset = pheno == "AD")
 
-# 获取元数据
-meta_data <- ad_data@meta.data
-
-# 创建CellChat对象
-cellchat <- createCellChat(object = normalized_data,
-                          meta = meta_data,
-                          group.by = "cell_groups")
-
-# 设置细胞身份
-cellchat <- setIdent(cellchat, ident.use = "cell_groups")
-
-
-
-# 1. 极其重要：将 Idents 设置为你用于分组的列
-# 这样 subset 函数才知道要按什么分组来抽样
+# Set cell type identity
 Idents(ad_data) <- "cell_groups"
 
-# 2. 执行下采样
-# downsample = 1000 表示每个细胞群最多保留1000个细胞
-# (如果某群少于1000个，则保留全部；如果多于1000个，随机抽1000个)
+# Downsample: max 1000 cells per group (to reduce memory usage)
+cat("Original cells:", ncol(ad_data), "\n")
 ad_data_subset <- subset(ad_data, downsample = 1000)
-
-# 3. 验证抽样结果
-# 检查总细胞数是否大幅减少
-cat("原细胞数:", ncol(ad_data), "\n")
-cat("下采样后细胞数:", ncol(ad_data_subset), "\n")
-
-# 检查各组分布 (你应该看到大组都被削减到了1000)
+cat("After downsampling:", ncol(ad_data_subset), "\n")
 print(table(Idents(ad_data_subset)))
 
-# 4. 提取下采样后的表达矩阵和元数据
-# 注意：CellChat 推荐使用标准化的数据 (slot = "data")
-# 这里的 assay = "RNA" 是最稳妥的，如果你用的是 SCTransform，也可以改为 "SCT"
+# ----------------------------- CellChat analysis -----------------------------
+# Extract normalized expression matrix
 data.input <- GetAssayData(ad_data_subset, assay = "RNA", slot = "data")
 meta.data <- ad_data_subset@meta.data
 
-# 5. 创建 CellChat 对象
-cellchat <- createCellChat(object = data.input, 
-                           meta = meta.data, 
-                           group.by = "cell_groups")
+# Create CellChat object
+cellchat <- createCellChat(object = data.input, meta = meta.data, group.by = "cell_groups")
 
-# 6. 设置配受体数据库 (人类)
-CellChatDB <- CellChatDB.human 
+# Load human ligand-receptor database
+CellChatDB <- CellChatDB.human
 cellchat@DB <- CellChatDB
 
-# 7. 运行预处理流程 (现在速度会非常快)
-# subsetData 这一步对于 CellChat 内部处理非蛋白编码基因很重要
+# Preprocessing
 cellchat <- subsetData(cellchat)
-
-# 识别过表达基因
 cellchat <- identifyOverExpressedGenes(cellchat)
-
-# 识别过表达配受体对
 cellchat <- identifyOverExpressedInteractions(cellchat)
 
-# 8. 计算通信概率 (核心步骤)
-# 由于数据量减少，这里应该可以在几分钟内跑完，不会再卡死
+# Compute communication probability (core step)
 cellchat <- computeCommunProb(cellchat, raw.use = TRUE)
 
-# 9. 过滤通信 (剔除极少细胞参与的通讯)
+# Filter out interactions involving few cells
 cellchat <- filterCommunication(cellchat, min.cells = 10)
 
-# 10. 计算通路层面的通信概率
+# Compute pathway-level communication
 cellchat <- computeCommunProbPathway(cellchat)
-
-# 11. 计算整合网络
 cellchat <- aggregateNet(cellchat)
 
-cat("CellChat 分析完成！\n")
+cat("CellChat analysis completed!\n")
 
-ptm = Sys.time()
-groupSize <- as.numeric(table(cellchat@idents))
-par(mfrow = c(1,2), xpd=TRUE)
-netVisual_circle(cellchat@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
-# p1 <- netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+# ----------------------------- Total communication weight bar plot -----------
+# Define cell type order for plotting
+cell_order <- c(
+  "EXC", "INH", "OLG", "OPC", "ENDO", "FIB", "MAC",
+  "Normal AST", "Senescent AST",
+  "Normal PER", "Senescent PER",
+  "Normal MIC", "Senescent MIC",
+  "Normal TC", "Senescent TC"
+)
 
-library(ggplot2)
+# Define colors (customizable)
+my_colors <- setNames(scales::hue_pal()(length(cell_order)), cell_order)
 
-# 假设 weight_matrix 已经计算好
-# weight_matrix <- cellchat@net$weight # 如果没有定义，请取消注释这一行
-
-# 计算总权重
+# Calculate total weights (outgoing + incoming)
+weight_matrix <- cellchat@net$weight
 total_weights <- rowSums(weight_matrix, na.rm = TRUE) + colSums(weight_matrix, na.rm = TRUE)
 
-# --- 关键步骤开始 ---
-
-# 1. 创建数据框
 df_total <- data.frame(
   CellType = names(total_weights),
   Weight = as.numeric(total_weights)
-)
+) %>%
+  filter(CellType %in% cell_order) %>%
+  mutate(CellType = factor(CellType, levels = cell_order))
 
-# 2. 【核心修改】将 CellType 转换为因子，并指定 levels 为我们定义的顺序
-# 只有这样，ggplot 才会按照这个顺序排列 X 轴
-df_total$CellType <- factor(df_total$CellType, levels = cell_order)
-
-# 3. 过滤掉数据中可能存在但不在 cell_order 中的细胞（防止报错）
-df_total <- df_total[!is.na(df_total$CellType), ]
-
-# --- 关键步骤结束 ---
-
-# 绘制柱状图
-p <- ggplot(df_total, aes(x = CellType, y = Weight, fill = CellType)) +
-  geom_bar(stat = "identity", width = 0.7, color = "black", size = 0.2) +  # 加了黑色边框让柱子更清晰
-  scale_fill_manual(values = my_colors) + # 使用定义好的颜色映射
+# Plot
+p_total <- ggplot(df_total, aes(x = CellType, y = Weight, fill = CellType)) +
+  geom_bar(stat = "identity", width = 0.7, color = "black", size = 0.2) +
+  scale_fill_manual(values = my_colors) +
   labs(
     title = "Total Communication Weight (Outgoing + Incoming)",
-    x = "Cell Types", 
-    y = "Total Interaction Strength"
+    x = "Cell Types", y = "Total Interaction Strength"
   ) +
-  theme_minimal(base_size = 14) + 
+  theme_minimal(base_size = 14) +
   theme(
-    # 坐标轴线
     axis.line = element_line(color = "black", linewidth = 0.5),
-    
-    # X轴标签：旋转45度，对应特定颜色
-    axis.text.x = element_text(angle = 45, hjust = 1, size = 11, color = "black", ),
-    
-    # Y轴标签
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 11, color = "black"),
     axis.text.y = element_text(size = 11, color = "black"),
-    
-    # 标题设置
     plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
-    
-    # 去掉图例（因为X轴已经写了名字，图例是多余的，如果你想要图例可以删掉这行）
     legend.position = "none",
-    
-    # 网格线优化
-    panel.grid.major.x = element_blank(), # 去掉垂直网格线，画面更干净
+    panel.grid.major.x = element_blank(),
     panel.grid.minor = element_blank()
   ) +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) # 底部贴边，顶部留10%空间
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+print(p_total)
 
-# 显示图片
-print(p)
-
-library(ggplot2)
-library(dplyr)
-library(tidyr)
-library(patchwork)
-
-# ==============================================================================
-# 1. 定义通用绘图函数 (核心逻辑)
-#    这个函数会自动完成计算信息流、计算LogFC、筛选通路、绘图的全过程
-# ==============================================================================
-plot_ageing_specific_flow <- function(cellchat, cell_type_name, normal_ident, senescent_ident) {
-  
-  message(paste("正在处理:", cell_type_name, "..."))
-  
-  # 提取所有通路
+# ----------------------------- Ageing-specific pathway analysis function -----
+plot_ageing_specific_flow <- function(cellchat, cell_type_name,
+                                      normal_ident, senescent_ident) {
+  message("Processing: ", cell_type_name)
   pathways <- cellchat@netP$pathways
-  
-  # --- 1.1 计算 Source (作为发送者) 的信息流 ---
-  flow_source_senescent <- sapply(pathways, function(p) {
+
+  # Information flow as source/target
+  flow_source_sen <- sapply(pathways, function(p) {
     net <- subsetCommunication(cellchat, sources.use = senescent_ident, signaling = p)
-    if (is.null(net)) return(0) else sum(net$prob)
+    if (is.null(net)) 0 else sum(net$prob)
   })
-  
-  flow_source_normal <- sapply(pathways, function(p) {
+  flow_source_nor <- sapply(pathways, function(p) {
     net <- subsetCommunication(cellchat, sources.use = normal_ident, signaling = p)
-    if (is.null(net)) return(0) else sum(net$prob)
+    if (is.null(net)) 0 else sum(net$prob)
   })
-  
-  # --- 1.2 计算 Target (作为接收者) 的信息流 ---
-  flow_target_senescent <- sapply(pathways, function(p) {
+  flow_target_sen <- sapply(pathways, function(p) {
     net <- subsetCommunication(cellchat, targets.use = senescent_ident, signaling = p)
-    if (is.null(net)) return(0) else sum(net$prob)
+    if (is.null(net)) 0 else sum(net$prob)
   })
-  
-  flow_target_normal <- sapply(pathways, function(p) {
+  flow_target_nor <- sapply(pathways, function(p) {
     net <- subsetCommunication(cellchat, targets.use = normal_ident, signaling = p)
-    if (is.null(net)) return(0) else sum(net$prob)
+    if (is.null(net)) 0 else sum(net$prob)
   })
-  
-  # --- 1.3 合并数据并计算 LogFC ---
-  df_combined <- data.frame(
+
+  # Combine and compute logFC
+  df <- data.frame(
     Pathway = pathways,
-    Source_Senescent = flow_source_senescent,
-    Source_Normal = flow_source_normal,
-    Target_Senescent = flow_target_senescent,
-    Target_Normal = flow_target_normal
+    Source_Sen = flow_source_sen,
+    Source_Nor = flow_source_nor,
+    Target_Sen = flow_target_sen,
+    Target_Nor = flow_target_nor
   ) %>%
     mutate(
-      # LogFC 计算
-      logFC_Source = log2((Source_Senescent + 1e-6) / (Source_Normal + 1e-6)),
-      logFC_Target = log2((Target_Senescent + 1e-6) / (Target_Normal + 1e-6)),
-      
-      # 定义类型
+      logFC_Source = log2((Source_Sen + 1e-6) / (Source_Nor + 1e-6)),
+      logFC_Target = log2((Target_Sen + 1e-6) / (Target_Nor + 1e-6)),
       Type_Source = case_when(
-        logFC_Source >= 0.5  ~ "Ageing-specific",
+        logFC_Source >= 0.5 ~ "Ageing-specific",
         logFC_Source <= -0.5 ~ "Normal-specific",
-        TRUE                  ~ "Conserved"
+        TRUE ~ "Conserved"
       ),
       Type_Target = case_when(
-        logFC_Target >= 0.5  ~ "Ageing-specific",
+        logFC_Target >= 0.5 ~ "Ageing-specific",
         logFC_Target <= -0.5 ~ "Normal-specific",
-        TRUE                  ~ "Conserved"
+        TRUE ~ "Conserved"
       )
     )
-  
-  # --- 1.4 筛选 Ageing-specific 通路 ---
-  # 筛选条件：Source或Target中被判定为Ageing-specific，且流值 > 0.05
-  target_pathways <- df_combined %>%
+
+  # Select ageing-specific pathways (|logFC|>=0.5 and flow>=0.05)
+  target_pathways <- df %>%
     filter(
-      (Type_Source == "Ageing-specific" | Type_Target == "Ageing-specific") & 
-      (Source_Senescent >= 0.05 | Target_Senescent >= 0.05)
+      (Type_Source == "Ageing-specific" | Type_Target == "Ageing-specific") &
+        (Source_Sen >= 0.05 | Target_Sen >= 0.05)
     ) %>%
     pull(Pathway) %>%
     unique()
-  
-  # 如果没有符合条件的通路，返回一个空图或提示
+
   if (length(target_pathways) == 0) {
-    message(paste("  警告:", cell_type_name, "没有检测到显著的衰老特异性通路。"))
     return(ggplot() + theme_void() + labs(title = paste(cell_type_name, "\n(No Sig. Pathways)")))
   }
-  
-  # --- 1.5 整理绘图数据 (Long Format) ---
-  # 提取 Senescent 数据
-  df_senescent <- df_combined %>%
-    filter(Pathway %in% target_pathways) %>%
-    mutate(InfoFlow = Source_Senescent + Target_Senescent, Condition = "Ageing") %>%
-    select(Pathway, InfoFlow, Condition)
-  
-  # 提取 Normal 数据
-  df_normal <- df_combined %>%
-    filter(Pathway %in% target_pathways) %>%
-    mutate(InfoFlow = Source_Normal + Target_Normal, Condition = "Normal") %>%
-    select(Pathway, InfoFlow, Condition)
-  
-  df_plot <- bind_rows(df_senescent, df_normal)
-  
-  # --- 1.6 排序 (按总流量排序) ---
-  pathway_order <- df_plot %>%
+
+  # Prepare data for plotting
+  df_plot <- bind_rows(
+    df %>% filter(Pathway %in% target_pathways) %>%
+      mutate(InfoFlow = Source_Sen + Target_Sen, Condition = "Ageing") %>%
+      select(Pathway, InfoFlow, Condition),
+    df %>% filter(Pathway %in% target_pathways) %>%
+      mutate(InfoFlow = Source_Nor + Target_Nor, Condition = "Normal") %>%
+      select(Pathway, InfoFlow, Condition)
+  ) %>%
     group_by(Pathway) %>%
-    summarise(Total = sum(InfoFlow)) %>%
-    arrange(desc(Total)) %>%
-    pull(Pathway)
-  
-  df_plot$Pathway <- factor(df_plot$Pathway, levels = pathway_order)
-  
-  # --- 1.7 绘图 ---
+    mutate(Total = sum(InfoFlow)) %>%
+    ungroup() %>%
+    mutate(Pathway = factor(Pathway, levels = unique(Pathway[order(Total, decreasing = TRUE)])))
+
+  # Plot stacked bars
   p <- ggplot(df_plot, aes(x = Pathway, y = InfoFlow, fill = Condition)) +
     geom_bar(stat = "identity", position = "stack", width = 0.6) +
     scale_fill_manual(values = c("Normal" = "#4DBBD5", "Ageing" = "#E64B35")) +
-    labs(
-      title = cell_type_name, 
-      y = NULL, 
-      x = NULL
-    ) +
+    labs(title = cell_type_name, y = NULL, x = NULL) +
     theme_minimal() +
     theme(
       axis.text.x = element_text(angle = 45, hjust = 1, size = 9, color = "black"),
@@ -264,89 +190,49 @@ plot_ageing_specific_flow <- function(cellchat, cell_type_name, normal_ident, se
       plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
       panel.grid.major.x = element_blank(),
       panel.grid.minor = element_blank(),
-      legend.position = "none", # 默认隐藏图例，最后合并时加
-      plot.background = element_rect(color = "black", linewidth = 0.5) # 加黑框
+      legend.position = "none",
+      plot.background = element_rect(color = "black", linewidth = 0.5)
     )
   return(p)
 }
 
+# Generate plots for four cell types
+p_AST <- plot_ageing_specific_flow(cellchat, "AST", "Normal AST", "Senescent AST") + labs(y = "Information Flow")
+p_MIC <- plot_ageing_specific_flow(cellchat, "MIC", "Normal MIC", "Senescent MIC")
+p_PER <- plot_ageing_specific_flow(cellchat, "PER", "Normal PER", "Senescent PER")
+p_TC  <- plot_ageing_specific_flow(cellchat, "TC",  "Normal TC",  "Senescent TC")
 
-# ==============================================================================
-# 2. 执行绘图 (AST, MIC, PER, TC)
-#    注意：这里输入的 Normal/Senescent 名字必须和 cellchat@idents 里的名字完全一致
-# ==============================================================================
-
-# 2.1 画 AST
-P_AST <- plot_ageing_specific_flow(cellchat, 
-                                   cell_type_name = "AST", 
-                                   normal_ident = "Normal AST", 
-                                   senescent_ident = "Senescent AST")
-
-# 2.2 画 MIC
-P_MIC <- plot_ageing_specific_flow(cellchat, 
-                                   cell_type_name = "MIC", 
-                                   normal_ident = "Normal MIC", 
-                                   senescent_ident = "Senescent MIC")
-
-# 2.3 画 PER
-P_PER <- plot_ageing_specific_flow(cellchat, 
-                                   cell_type_name = "PER", 
-                                   normal_ident = "Normal PER", 
-                                   senescent_ident = "Senescent PER")
-
-# 2.4 画 TC
-P_TC <- plot_ageing_specific_flow(cellchat, 
-                                  cell_type_name = "TC", 
-                                  normal_ident = "Normal TC", 
-                                  senescent_ident = "Senescent TC")
-
-
-# ==============================================================================
-# 3. 使用 Patchwork 合并图形
-# ==============================================================================
-
-# 为了显示图例，我们单独取一张图把图例拿出来，或者在 patchowork 里设置 guides='collect'
-# 这里我们让第一张图带Y轴标题，其他的去掉，以节省空间
-
-P_AST <- P_AST + labs(y = "Information Flow") # 只有第一个图保留Y轴标题
-
-# 组合
-combined_plot <- (P_AST | P_MIC | P_PER | P_TC) + 
+combined_plot <- (p_AST | p_MIC | p_PER | p_TC) +
   plot_annotation(
     title = "Ageing-specific Signaling Pathways Across Cell Types",
-    subtitle = "Stacked bars show Information Flow (Incoming + Outgoing). Red indicates Ageing condition.",
+    subtitle = "Stacked bars: Information Flow (Incoming+Outgoing). Red = Ageing.",
     theme = theme(
       plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
       plot.subtitle = element_text(hjust = 0.5, size = 12)
     )
   )
-
-# ==============================================================================
-# 4. 输出与保存
-# ==============================================================================
-
 print(combined_plot)
 
+# ----------------------------- Chord diagrams for selected pathways ----------
 pathways_show <- c(
-  "LAMININ", "FGF", "COLLAGEN", "ANGPTL", "SPP1", "FN1", "TGFb", "NOTCH",
-  "NCAM", "NRXN", "NRG", "NEGR"
+  "LAMININ", "FGF", "COLLAGEN", "ANGPTL", "SPP1", "FN1",
+  "TGFb", "NOTCH", "NCAM", "NRXN", "NRG", "NEGR"
 )
 
-# 检查通路是否已计算，若缺失则运行：
-# cellchat <- computeCommunProbPathway(cellchat)
+# Ensure cell type order and colors are consistent
+current_idents <- as.character(cellchat@idents)
+cellchat@idents <- factor(current_idents, levels = cell_order)
+cellchat <- updateCellChat(cellchat)
 
-# 设置输出目录（可选）
-output_dir <- "pathway_chord_plots"
-if (!dir.exists(output_dir)) dir.create(output_dir)
+dir.create("pathway_chord_plots", showWarnings = FALSE)
 
-# 循环每个通路，分别绘制和弦图并保存为 PDF
 for (pwy in pathways_show) {
-  pdf(file.path(output_dir, paste0(pwy, "_chord.pdf")), width = 10, height = 10)
+  pdf(file.path("pathway_chord_plots", paste0(pwy, "_chord.pdf")), width = 10, height = 10)
   netVisual_chord_cell(
     cellchat,
-    signaling = pwy,               # 单条通路
-    slot.name = "netP",           # 使用整体通讯概率
-    color.use = my_colors,        # 您的自定义颜色
+    signaling = pwy,
+    slot.name = "netP",
+    color.use = my_colors,
     lab.cex = 0.8,
     small.gap = 2,
     big.gap = 8,
@@ -355,46 +241,8 @@ for (pwy in pathways_show) {
   dev.off()
 }
 
-# 1. 定义您想要的顺序
-cell_order <- c(
-  "EXC", "INH", "OLG", "OPC",
-  "ENDO",
-  "FIB",
-  "MAC",
-  "Normal AST", "Senescent AST",
-  "Normal PER", "Senescent PER",
-  "Normal MIC", "Senescent MIC",
-  "Normal TC", "Senescent TC"
-)
-
-# 2. 【核心修正步骤】
-# 逻辑：先拿出当前的细胞名字(character)，告诉 R 这些名字属于一个新的因子级别(levels)
-# 这样 R 就会把 "ENDO" 对应的数据搬运到 cell_order 中 "ENDO" 所在的位置（第5位）
-
-current_idents <- as.character(cellchat@idents) # 这一步获取每个细胞当前的真实名字（如 "ENDO"）
-
-# 检查一下原来的名字是否都在您的 cell_order 里，防止拼写错误
-if(!all(unique(current_idents) %in% cell_order)) {
-  warning("注意：cell_order 中的名字与数据中的名字不完全匹配，请检查拼写！")
-  print(setdiff(unique(current_idents), cell_order)) # 打印出没匹配上的名字
-}
-
-# 重新生成因子
-cellchat@idents <- factor(current_idents, levels = cell_order)
-
-# 3. 同步更新 Meta data (CellChat 绘图经常从这里取数据)
-# 假设您的细胞类型列名叫 'labels' 或 'cluster'，请根据实际情况修改
-if ("labels" %in% colnames(cellchat@meta)) {
-  cellchat@meta$labels <- factor(as.character(cellchat@meta$labels), levels = cell_order)
-}
-
-# 4. 更新 CellChat 对象结构（防止内部索引错乱）
-cellchat <- updateCellChat(cellchat)
-
-# --- 绘图部分 ---
-
-# 定义颜色
-my_colors <- setNames(scales::hue_pal()(length(cell_order)), cell_order)
+# ----------------------------- Violin plots for ligand/receptor expression ---
+dir.create("violin_plots", showWarnings = FALSE)
 
 for (pwy in pathways_show) {
   tryCatch({
@@ -404,305 +252,157 @@ for (pwy in pathways_show) {
       enriched.only = TRUE,
       type = "violin",
       color.use = my_colors
-    )
-    
-    # 强制指定 ggplot 的 X 轴顺序
-    p <- p + ggplot2::scale_x_discrete(limits = cell_order)
-    
-    pdf(file.path('violin_plots', paste0(pwy, "_violin.pdf")), width = 14, height = 8) # 稍微加宽一点
-    print(p)
-    dev.off()
-    
-    message("已完成：", pwy)
+    ) + scale_x_discrete(limits = cell_order)  # enforce order
+    ggsave(file.path("violin_plots", paste0(pwy, "_violin.pdf")),
+           p, width = 14, height = 8)
+    message("Completed: ", pwy)
   }, error = function(e) {
-    message("跳过 ", pwy, "：", e$message)
+    message("Skip ", pwy, ": ", e$message)
   })
 }
 
-library(Seurat)
-library(CellChat)
-library(dplyr)
-library(patchwork)
+# ----------------------------- Optional: sample‑wise analysis ----------------
+# If memory is limited, split by library, downsample per sample, and compute CellChat.
+# Results are saved as RDS files.
 
-# 设置保存路径
-save_dir <- "cellchat_objects_AD"
-if (!dir.exists(save_dir)) dir.create(save_dir)
+# seurat_list <- SplitObject(ad_data, split.by = "library")
+# rm(ad_data); gc()
+# dir.create("cellchat_objects_AD", showWarnings = FALSE)
+#
+# for (sample_name in names(seurat_list)) {
+#   file_path <- file.path("cellchat_objects_AD", paste0(sample_name, "_cellchat.rds"))
+#   if (file.exists(file_path)) next
+#   obj <- seurat_list[[sample_name]]
+#   obj <- subset(obj, downsample = 500)   # max 500 cells per group per sample
+#   if (ncol(obj) < 50) next
+#   tryCatch({
+#     cellchat <- createCellChat(object = obj, group.by = "ident", assay = "RNA")
+#     cellchat@DB <- CellChatDB
+#     cellchat <- subsetData(cellchat)
+#     cellchat <- identifyOverExpressedGenes(cellchat)
+#     cellchat <- identifyOverExpressedInteractions(cellchat)
+#     cellchat <- computeCommunProb(cellchat, raw.use = TRUE, type = "truncatedMean", trim = 0.1)
+#     cellchat <- filterCommunication(cellchat, min.cells = 10)
+#     cellchat <- computeCommunProbPathway(cellchat)
+#     cellchat <- aggregateNet(cellchat)
+#     saveRDS(cellchat, file = file_path)
+#   }, error = function(e) message("Error in ", sample_name, ": ", e))
+#   rm(obj, cellchat); gc()
+# }
 
-# 设置 Seurat 的身份为新的分组
-Idents(ad_data) <- "cell_groups"
+# ----------------------------- Read all sample objects -----------------------
+# rds_files <- list.files("cellchat_objects_AD", pattern = "_cellchat\\.rds$", full.names = TRUE)
+# cellchat_list <- lapply(rds_files, readRDS)
+# names(cellchat_list) <- gsub("_cellchat\\.rds$", "", basename(rds_files))
 
-print("抽样前的细胞数量：")
-print(table(Idents(ad_data)))
-
-# ==============================================================================
-# 优化版：先拆分样本，再独立抽样 (Downsample per Sample)
-# ==============================================================================
-
-# ... (前面的加载包、定义 AST_Sen/Nor 分组代码不变) ...
-
-# 1. 按 Library 拆分大对象 (此时尚未抽样)
-print("正在按 Library 拆分对象...")
-seurat_list <- SplitObject(ad_data, split.by = "library")
-
-# 2. 释放大对象内存 (关键！防止内存溢出)
-rm(ad_data)
-gc()
-
-# 3. 循环处理每个样本：独立抽样 + 计算 CellChat
-for (sample_name in names(seurat_list)) {
-  
-  file_path <- file.path(save_dir, paste0(sample_name, "_cellchat.rds"))
-  if (file.exists(file_path)) next
-  
-  print(paste("=== 处理样本:", sample_name, "==="))
-  obj <- seurat_list[[sample_name]]
-  
-  # --- 3.1 独立抽样 (关键修改) ---
-  # 对当前样本，每种细胞类型 (如 AST_Sen) 最多保留 500 个
-  # 为什么是 500？因为单样本内 500 个细胞足够算准通讯概率了，且速度快
-  # 如果你的电脑内存够大，可以改回 1000
-  print(paste("  -> 正在抽样 (Max 500 cells per group)..."))
-  
-  # 注意：subset 可能因为某组细胞不足 500 而保留所有细胞，这是正常的
-  obj <- subset(obj, downsample = 500)
-  
-  # 再次检查细胞数，防止抽样后某组细胞太少
-  # 如果总细胞数少于 50，跳过该样本
-  if (ncol(obj) < 50) {
-    print("  -> 细胞数过少，跳过")
-    next
-  }
-  
-  tryCatch({
-    # --- 3.2 计算 CellChat ---
-    # 使用 truncatedMean 方法加速
-    cellchat <- createCellChat(object = obj, group.by = "ident", assay = "RNA")
-    cellchat@DB <- CellChatDB
-    
-    cellchat <- subsetData(cellchat)
-    cellchat <- identifyOverExpressedGenes(cellchat)
-    cellchat <- identifyOverExpressedInteractions(cellchat)
-    
-    # trim = 0.1 进一步加速并提高稳健性
-    cellchat <- computeCommunProb(cellchat, raw.use = TRUE, type = "truncatedMean", trim = 0.1)
-    
-    # 过滤掉细胞数少于 10 的通讯 (由于已经保证了抽样基数，这里可以用 10)
-    cellchat <- filterCommunication(cellchat, min.cells = 10)
-    
-    cellchat <- computeCommunProbPathway(cellchat)
-    cellchat <- aggregateNet(cellchat)
-    
-    saveRDS(cellchat, file = file_path)
-    print(paste("  -> 已保存"))
-    
-  }, error = function(e) {
-    print(paste("  -> 错误:", e))
-  })
-  
-  # 处理完一个样本后，手动清理内存
-  rm(obj, cellchat)
-  gc()
-}
-
-# 设置保存目录
-save_dir <- "cellchat_objects_AD"
-
-# 1. 获取所有保存的.rds文件
-rds_files <- list.files(save_dir, pattern = "_cellchat\\.rds$", full.names = TRUE)
-print(paste("找到", length(rds_files), "个CellChat对象文件"))
-
-# 2. 初始化列表和样本名称
-cellchat_list <- list()
-sample_names <- gsub("_cellchat\\.rds$", "", basename(rds_files))
-
-# 3. 循环读取所有对象并计算通讯网络
-for (i in 1:length(rds_files)) {
-  sample_name <- sample_names[i]
-  file_path <- rds_files[i]
-  
-  print(paste("=== 处理样本:", sample_name, "==="))
-  
-  # 读取CellChat对象
-  cellchat_obj <- readRDS(file_path)
-  
-  # 检查是否已经计算过通讯概率
-  if (length(cellchat_obj@net$prob) == 0) {
-    print("未检测到通讯网络，重新计算...")
-    
-    # 确保进行了完整的预处理流程
-    cellchat_obj <- identifyOverExpressedGenes(cellchat_obj)
-    cellchat_obj <- identifyOverExpressedInteractions(cellchat_obj)
-    cellchat_obj <- computeCommunProb(cellchat_obj)
-    
-    # 可选：计算聚合的通讯概率
-    cellchat_obj <- computeCommunProbPathway(cellchat_obj)
-    
-    print("通讯网络计算完成")
-  } else {
-    print("通讯网络已存在，直接使用")
-  }
-    # 将对象添加到列表
-  cellchat_list[[sample_name]] <- cellchat_obj
-}
-
-library(CellChat)
-library(dplyr)
-library(ggplot2)
-library(ggpubr)
-library(tidyr)
-
-# ==============================================================================
-# 1. 定义不区分状态的细胞类型 (Static Cells)
-# ==============================================================================
-static_cells <- c("INH", "EXC")
+# ----------------------------- Pairwise comparison (Senescent vs Normal) -----
+# Define three groups of interesting ligand‑receptor pairs
+static_cells <- c("INH", "EXC")   # cell types without condition prefix
 
 get_cell_name <- function(cell_type, condition_prefix) {
-  if (cell_type %in% static_cells) {
-    return(cell_type)
-  } else {
-    return(paste(condition_prefix, cell_type))
+  if (cell_type %in% static_cells) return(cell_type)
+  else return(paste(condition_prefix, cell_type))
+}
+
+group1_pairs <- list(
+  list(ligand = "COL4A1", receptor = "CD44", source = "PER", target = "AST"),
+  list(ligand = "LAMA2",  receptor = "CD44", source = "PER", target = "AST"),
+  list(ligand = "FN1",    receptor = "CD44", source = "PER", target = "AST")
+)
+
+group2_pairs <- list(
+  list(ligand = "NRG3",   receptor = "ERBB4", source = "INH", target = "PER"),
+  list(ligand = "NRG2",   receptor = "ERBB4", source = "AST", target = "INH"),
+  list(ligand = "NRXN1",  receptor = "NLGN1", source = "AST", target = "INH"),
+  list(ligand = "NRXN1",  receptor = "NLGN1", source = "PER", target = "INH"),
+  list(ligand = "NRXN1",  receptor = "NLGN1", source = "MIC", target = "INH"),
+  list(ligand = "NRXN1",  receptor = "NLGN1", source = "AST", target = "EXC"),
+  list(ligand = "NRXN1",  receptor = "NLGN1", source = "PER", target = "EXC"),
+  list(ligand = "NRXN1",  receptor = "NLGN1", source = "MIC", target = "EXC")
+)
+
+group3_pairs <- list(
+  list(ligand = "ANGPTL4", receptor = "CDH11",     source = "AST", target = "PER"),
+  list(ligand = "FGF1",    receptor = "FGFR1",     source = "PER", target = "AST"),
+  list(ligand = "SPP1",    receptor = "CD44",      source = "MIC", target = "AST"),
+  list(ligand = "TGFB1",   receptor = "TGFbR1_R2", source = "MIC", target = "TC")
+)
+
+# Example: using a single sample (cellchat) for demonstration
+# For multiple samples, replace with a loop over cellchat_list
+sample_names <- "Sample1"
+cellchat_list <- list(Sample1 = cellchat)
+
+all_results <- data.frame()
+
+for (pair in group1_pairs) {
+  src_sen <- get_cell_name(pair$source, "Senescent")
+  tar_sen <- get_cell_name(pair$target, "Senescent")
+  src_nor <- get_cell_name(pair$source, "Normal")
+  tar_nor <- get_cell_name(pair$target, "Normal")
+
+  for (sname in sample_names) {
+    df.net <- subsetCommunication(cellchat_list[[sname]])
+    if (is.null(df.net)) next
+
+    prob_sen <- df.net %>%
+      filter(source == src_sen, target == tar_sen,
+             ligand == pair$ligand, receptor == pair$receptor) %>%
+      pull(prob)
+    prob_sen <- ifelse(length(prob_sen) == 0, 0, prob_sen[1])
+
+    prob_nor <- df.net %>%
+      filter(source == src_nor, target == tar_nor,
+             ligand == pair$ligand, receptor == pair$receptor) %>%
+      pull(prob)
+    prob_nor <- ifelse(length(prob_nor) == 0, 0, prob_nor[1])
+
+    all_results <- rbind(all_results, data.frame(
+      Sample = sname,
+      Ligand = pair$ligand,
+      Receptor = pair$receptor,
+      Source = pair$source,
+      Target = pair$target,
+      Senescent = prob_sen,
+      Normal = prob_nor
+    ))
   }
 }
 
-# ==============================================================================
-# 2. 定义三组配受体对列表
-# ==============================================================================
+# Generate paired plots
+if (nrow(all_results) > 0) {
+  results_long <- all_results %>%
+    pivot_longer(cols = c("Senescent", "Normal"), names_to = "Condition", values_to = "Probability") %>%
+    mutate(Condition = factor(Condition, levels = c("Normal", "Senescent")))
 
-# --- 第一组: PER -> AST 的 CD44 通路 ---
-group1_pairs <- list(
-  list(ligand="COL4A1", receptor="CD44", source_type="PER", target_type="AST"),
-  list(ligand="LAMA2",  receptor="CD44", source_type="PER", target_type="AST"),
-  list(ligand="FN1",    receptor="CD44", source_type="PER", target_type="AST")
-)
+  dir.create("pairwise_comparisons", showWarnings = FALSE)
 
-# --- 第二组: NRG/ERBB4 与 NRXN1/NLGN1 系列 ---
-group2_pairs <- list(
-  # 1. NRG1 -> ERBB4 (INH -> PER)
-  list(ligand="NRG3",   receptor="ERBB4", source_type="INH", target_type="PER"),
-  # 2. NRG2 -> ERBB4 (AST -> INH)
-  list(ligand="NRG2",   receptor="ERBB4", source_type="AST", target_type="INH"),
-  # NRXN1 -> NLGN1 (Target: INH)
-  list(ligand="NRXN1",  receptor="NLGN1", source_type="AST", target_type="INH"),
-  list(ligand="NRXN1",  receptor="NLGN1", source_type="PER", target_type="INH"),
-  list(ligand="NRXN1",  receptor="NLGN1", source_type="MIC", target_type="INH"),
-  # NRXN1 -> NLGN1 (Target: EXC)
-  list(ligand="NRXN1",  receptor="NLGN1", source_type="AST", target_type="EXC"),
-  list(ligand="NRXN1",  receptor="NLGN1", source_type="PER", target_type="EXC"),
-  list(ligand="NRXN1",  receptor="NLGN1", source_type="MIC", target_type="EXC")
-)
+  for (pair_id in unique(paste(results_long$Ligand, results_long$Receptor, results_long$Source, results_long$Target))) {
+    sub <- results_long %>%
+      filter(paste(Ligand, Receptor, Source, Target) == pair_id)
+    if (nrow(sub) == 0) next
 
-# --- 第三组: 目标四对 (来自第一段代码) ---
-group3_pairs <- list(
-  list(ligand="ANGPTL4", receptor="CDH11",     source_type="AST", target_type="PER"),
-  list(ligand="FGF1",    receptor="FGFR1",     source_type="PER", target_type="AST"),
-  list(ligand="SPP1",    receptor="CD44",      source_type="MIC", target_type="AST"),
-  list(ligand="TGFB1",   receptor="TGFbR1_R2", source_type="MIC", target_type="TC")
-)
-
-# 确保 sample_names 已定义（例如从 cellchat_list 获取）
-# sample_names <- names(cellchat_list)
-
-# ==============================================================================
-# 3. 定义分析并单独保存图片的函数
-# ==============================================================================
-analyze_and_save_pairs <- function(target_pairs_list, group_name, output_dir = ".") {
-  
-  # 如果输出目录不存在则创建
-  if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
-  
-  for (k in 1:length(target_pairs_list)) {
-    pair <- target_pairs_list[[k]]
-    
-    # 动态构建细胞名称
-    src_sen_name <- get_cell_name(pair$source_type, "Senescent")
-    tar_sen_name <- get_cell_name(pair$target_type, "Senescent")
-    src_nor_name <- get_cell_name(pair$source_type, "Normal")
-    tar_nor_name <- get_cell_name(pair$target_type, "Normal")
-    
-    message(paste0("\n>>> [", group_name, "] 分析第 ", k, " 对: ", pair$ligand, "-", pair$receptor))
-    message(paste0("    对比: ", src_sen_name, "->", tar_sen_name, "  VS  ", src_nor_name, "->", tar_nor_name))
-    
-    sen_probs <- c()
-    nor_probs <- c()
-    valid_samples <- c()
-    
-    for (sample_name in sample_names) {
-      cellchat_obj <- cellchat_list[[sample_name]]
-      df.net <- subsetCommunication(cellchat_obj)
-      
-      if (is.null(df.net)) {
-        sen_probs <- c(sen_probs, 0)
-        nor_probs <- c(nor_probs, 0)
-        valid_samples <- c(valid_samples, sample_name)
-        next
-      }
-      
-      prob_s <- df.net %>% 
-        filter(source == src_sen_name, target == tar_sen_name, 
-               ligand == pair$ligand, receptor == pair$receptor) %>%
-        pull(prob)
-      if(length(prob_s) == 0) prob_s <- 0
-      
-      prob_n <- df.net %>% 
-        filter(source == src_nor_name, target == tar_nor_name, 
-               ligand == pair$ligand, receptor == pair$receptor) %>%
-        pull(prob)
-      if(length(prob_n) == 0) prob_n <- 0
-      
-      sen_probs <- c(sen_probs, prob_s[1])
-      nor_probs <- c(nor_probs, prob_n[1])
-      valid_samples <- c(valid_samples, sample_name)
-    }
-    
-    results_df <- data.frame(
-      Sample = valid_samples,
-      Senescent = sen_probs,
-      Normal = nor_probs
-    )
-    
-    results_long <- pivot_longer(results_df, 
-                                 cols = c("Senescent", "Normal"),
-                                 names_to = "Condition", 
-                                 values_to = "Probability")
-    
-    results_long$Condition <- factor(results_long$Condition, levels = c("Normal", "Senescent"))
-    
-    # 生成标题和副标题
-    main_title <- paste0(pair$ligand, " - ", pair$receptor)
-    sub_title <- paste0(pair$source_type, " \u2192 ", pair$target_type)
-    
-    p <- ggpaired(results_long, 
-                  x = "Condition", 
-                  y = "Probability",
-                  id = "Sample",
-                  color = "Condition", 
-                  palette = c("#00AFBB", "#FC4E07"), 
-                  line.color = "gray", 
-                  line.size = 0.4,
-                  point.size = 2,
-                  xlab = "") +
-      stat_compare_means(paired = TRUE, method = "wilcox.test", 
-                         label = "p.format", label.y.npc = "top", vjust = 1) +
-      labs(title = main_title,
-           subtitle = sub_title,
+    p <- ggpaired(sub, x = "Condition", y = "Probability",
+                  id = "Sample", color = "Condition",
+                  palette = c("#00AFBB", "#FC4E07"),
+                  line.color = "gray", line.size = 0.4,
+                  point.size = 2, xlab = "") +
+      stat_compare_means(paired = TRUE, method = "wilcox.test",
+                         label = "p.format", label.y.npc = "top") +
+      labs(title = paste(unique(sub$Ligand), "-", unique(sub$Receptor)),
+           subtitle = paste(unique(sub$Source), "\u2192", unique(sub$Target)),
            y = "Probability") +
       theme(legend.position = "none",
             plot.title = element_text(size = 11, face = "bold", hjust = 0.5),
             plot.subtitle = element_text(size = 9, hjust = 0.5))
-    
-    # 保存为单独的文件（PNG格式）
-    filename <- file.path(output_dir, 
-                          paste0(group_name, "_", k, "_", 
-                                 pair$ligand, "-", pair$receptor, "_",
-                                 pair$source_type, "2", pair$target_type, ".pdf"))
-    ggsave(filename, p, width = 6, height = 6, )
-    message("    已保存: ", filename)
+
+    ggsave(file.path("pairwise_comparisons",
+                     paste0(unique(sub$Ligand), "-", unique(sub$Receptor), "_",
+                            unique(sub$Source), "2", unique(sub$Target), ".pdf")),
+           p, width = 6, height = 6)
   }
-  
-  message("\n所有图片已保存至: ", output_dir)
 }
 
-
-analyze_and_save_pairs(group1_pairs, group_name = "group1", output_dir = "group1_output")
-analyze_and_save_pairs(group2_pairs, group_name = "group2", output_dir = "group2_output")
-analyze_and_save_pairs(group3_pairs, group_name = "group3", output_dir = "group3_output")
+# =============================================================================
+# End of script
+# =============================================================================
