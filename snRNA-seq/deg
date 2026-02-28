@@ -1,5 +1,5 @@
 # =============================================================================
-# Script 2: Differential Expression Analysis (pseudobulk and single‑cell)
+#  Differential Expression Analysis (pseudobulk and single‑cell)
 # =============================================================================
 
 library(Seurat)
