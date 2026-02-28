@@ -1,5 +1,5 @@
 # =============================================================================
-# Script 1: Cell Annotation (QC, doublet removal, integration, clustering)
+# Cell Annotation (QC, doublet removal, integration, clustering)
 # =============================================================================
 
 library(Seurat)
