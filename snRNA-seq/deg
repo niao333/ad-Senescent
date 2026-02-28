@@ -1,1 +1,99 @@
+# =============================================================================
+# Script 2: Differential Expression Analysis (pseudobulk and single‑cell)
+# =============================================================================
 
+library(Seurat)
+library(muscat)
+library(limma)
+library(dplyr)
+
+# -----------------------------------------------------------------------------
+# Load the integrated and annotated Seurat object
+# -----------------------------------------------------------------------------
+load('integrated_sc.RData')
+
+# -----------------------------------------------------------------------------
+# Pseudobulk differential expression using muscat (sex comparison)
+# -----------------------------------------------------------------------------
+# Switch to RNA assay for counts
+DefaultAssay(combined) <- "RNA"
+
+# Convert to SingleCellExperiment
+pseudo <- as.SingleCellExperiment(combined)
+
+# Filter genes: keep genes expressed in at least 10 cells with count >1
+pseudo <- pseudo[rowSums(counts(pseudo) > 0) > 0, ]
+pseudo <- pseudo[rowSums(counts(pseudo) > 1) >= 10, ]
+
+# Prepare SCE for muscat: specify cluster id (celltype), group id (sex), sample id (library)
+pseudo_prep <- prepSCE(pseudo,
+                       kid = "celltype",      # cluster/cell type
+                       gid = "sex",           # group of interest (e.g., "F", "M")
+                       sid = "library",       # sample ID
+                       drop = FALSE)
+
+# Aggregate counts per cluster and sample
+sex_pb <- aggregateData(pseudo_prep,
+                        assay = "counts", fun = "sum",
+                        by = c("cluster_id", "sample_id"))
+
+# Extract experiment info and build design matrix
+ei <- metadata(sex_pb)$experiment_info
+design <- model.matrix(~ 0 + ei$group_id)
+dimnames(design) <- list(ei$sample_id, levels(ei$group_id))
+
+# Contrast: Female vs Male
+contrast <- makeContrasts(F - M, levels = design)
+
+# Run pseudobulk DE analysis with edgeR
+sex_res <- pbDS(sex_pb, design = design, contrast = contrast,
+                method = "edgeR", filter = 'both', min_cells = 10)
+
+# Extract results per cluster and save as CSV
+tbl <- sex_res$table[[1]]
+for (j in 1:length(tbl)) {
+  cluster_name <- names(tbl)[j]
+  k1 <- tbl[[j]]
+  print(paste(cluster_name, ':', nrow(subset(k1, p_adj.loc < 0.05)), sep = ''))
+  write.csv(k1, paste0('muscat_deg/', cluster_name, '_sex.csv'))
+}
+
+# -----------------------------------------------------------------------------
+# Single‑cell differential expression using Seurat (for each cell type)
+# -----------------------------------------------------------------------------
+# Create output directory if needed (uncomment if directory doesn't exist)
+# dir.create('deg_seurat', showWarnings = FALSE)
+
+for (cell in unique(combined$celltype)) {
+  # Subset to current cell type
+  data <- subset(combined, celltype == cell)
+  
+  # Sex comparison (F vs M)
+  sex_deg <- FindMarkers(data,
+                         ident.1 = 'F',
+                         ident.2 = 'M',
+                         group.by = 'sex',
+                         logfc.threshold = 0.25,
+                         pseudocount.use = 0.5)
+  
+  # Age comparison (old vs young)
+  age_deg <- FindMarkers(data,
+                         ident.1 = 'old',
+                         ident.2 = 'young',
+                         group.by = 'age_bin',
+                         logfc.threshold = 0.25,
+                         pseudocount.use = 0.5)
+  
+  # Phenotype comparison (AD vs non-AD)
+  ad_deg <- FindMarkers(data,
+                        ident.1 = 'AD',
+                        ident.2 = 'non-AD',
+                        group.by = 'pheno',
+                        logfc.threshold = 0.25,
+                        pseudocount.use = 0.5)
+  
+  # Save results
+  write.csv(sex_deg, paste0('deg_seurat/', cell, '_sex.csv'))
+  write.csv(age_deg, paste0('deg_seurat/', cell, '_age.csv'))
+  write.csv(ad_deg,  paste0('deg_seurat/', cell, '_ad.csv'))
+}
