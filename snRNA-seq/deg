@@ -97,3 +97,110 @@ for (cell in unique(combined$celltype)) {
   write.csv(age_deg, paste0('deg_seurat/', cell, '_age.csv'))
   write.csv(ad_deg,  paste0('deg_seurat/', cell, '_ad.csv'))
 }
+
+
+# Heatmap of Significant DEGs per Cell Type (Overall)
+
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(stringr)
+library(tools)
+
+# Parameters
+padj_cutoff <- 0.05
+logfc_cutoff <- 0.25
+target_celltypes <- c("EXC", "INH", "OLG", "OPC", "AST", "ENDO", "PER", "FIB", "MIC", "MAC", "TC")
+group_order <- c("Sex", "Age", "AD")
+
+# Read all CSV files in working directory
+files <- list.files(pattern = "\\.csv$")
+plot_list <- list()
+
+for (f in files) {
+  df <- read.csv(f)
+  # Handle column name variations
+  if ("p_val_adj" %in% colnames(df)) df <- rename(df, p_adj.loc = p_val_adj)
+  if ("avg_log2FC" %in% colnames(df)) df <- rename(df, logFC = avg_log2FC)
+  
+  if (all(c("p_adj.loc", "logFC") %in% colnames(df))) {
+    sig_count <- df %>% filter(p_adj.loc < padj_cutoff & abs(logFC) > logfc_cutoff) %>% nrow()
+    
+    # Parse filename: e.g., "AST_ad.csv" -> celltype = "AST", group = "AD"
+    base <- file_path_sans_ext(basename(f))
+    parts <- str_split(base, "_")[[1]]
+    celltype <- paste(parts[1:(length(parts)-1)], collapse = "_")
+    group <- parts[length(parts)]
+    
+    # Map to standard group names
+    group <- case_when(group == "ad" ~ "AD", group == "disease" ~ "AD",
+                       group == "age" ~ "Age", group == "sex" ~ "Sex",
+                       TRUE ~ group)
+    
+    plot_list[[f]] <- data.frame(CellType = celltype, Group = group, Count = sig_count)
+  }
+}
+
+# Combine and clean
+heatmap_data <- bind_rows(plot_list) %>%
+  mutate(CellType = case_when(CellType == "EC" ~ "ENDO", CellType == "INC" ~ "INH",
+                              CellType == "Fibroblast" ~ "FIB", CellType == "Pericyte" ~ "PER",
+                              CellType == "Macrophage" ~ "MAC", CellType == "T" ~ "TC",
+                              TRUE ~ CellType)) %>%
+  filter(CellType %in% target_celltypes) %>%
+  complete(CellType, Group, fill = list(Count = 0)) %>%
+  mutate(CellType = factor(CellType, levels = rev(target_celltypes)),
+         Group = factor(Group, levels = group_order))
+
+# Heatmap with numbers
+p <- ggplot(heatmap_data, aes(x = Group, y = CellType, fill = Count)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Count, color = Count > 500), size = 3.5, show.legend = FALSE) +
+  scale_color_manual(values = c("TRUE" = "white", "FALSE" = "black")) +
+  scale_fill_gradientn(colors = c("#FFF5F0", "#FEE0D2", "#FC9272", "#DE2D26", "#67000D"),
+                       limits = c(0, 1000), oob = scales::squish, name = "# significant genes") +
+  theme_minimal() + theme(axis.title = element_blank(), axis.text.x = element_text(angle = 0))
+print(p)
+
+# Heatmap of Significant DEGs by Brain Region (EXC and INH only)
+
+# Similar to above but adds Region dimension
+regions <- c("PFC", "SFG", "OC", "OTC", "M1", "MTG")
+celltype_mapping <- c("EXC" = "EXC", "INC" = "INH", "EC" = "ENDO", "Fibroblast" = "FIB",
+                      "Pericyte" = "PER", "Macrophage" = "MAC", "T" = "TC")
+display_celltypes <- c("EXC", "INH")
+
+all_data <- list()
+for (region in regions) {
+  region_path <- file.path("path/to/deg/folders", paste0(region, "_deg_seurat"))
+  files <- list.files(region_path, pattern = "\\.csv$", full.names = TRUE)
+  files <- files[grepl("^(EXC_|INC_)", basename(files))]
+  
+  for (f in files) {
+    df <- read.csv(f)
+    df <- rename(df, p_adj.loc = p_val_adj, logFC = avg_log2FC)  # adjust if needed
+    sig_count <- df %>% filter(p_adj.loc < 0.05 & abs(logFC) > 0.25) %>% nrow()
+    
+    base <- file_path_sans_ext(basename(f))
+    parts <- str_split(base, "_")[[1]]
+    celltype_raw <- parts[1]
+    celltype <- celltype_mapping[celltype_raw]
+    if (is.na(celltype) || !celltype %in% display_celltypes) next
+    
+    all_data[[paste(region, celltype)]] <- data.frame(Region = region, CellType = celltype, Count = sig_count)
+  }
+}
+
+heatmap_region <- bind_rows(all_data) %>%
+  complete(CellType, Region, fill = list(Count = 0)) %>%
+  mutate(CellType = factor(CellType, levels = rev(display_celltypes)),
+         Region = factor(Region, levels = regions))
+
+p <- ggplot(heatmap_region, aes(x = Region, y = CellType, fill = Count)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Count), size = 3.5) +
+  scale_fill_gradientn(colors = c("#FFF5F0", "#FEE0D2", "#FC9272", "#DE2D26", "#67000D"),
+                       limits = c(0, max(heatmap_region$Count))) +
+  theme_minimal() + theme(axis.title = element_blank())
+print(p)
+
