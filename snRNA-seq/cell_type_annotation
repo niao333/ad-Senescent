@@ -147,3 +147,34 @@ combined$celltype <- dplyr::recode(combined$seurat_clusters,
 
 # Save the integrated and annotated object
 save(combined, file = 'integrated_sc.RData')
+
+library(Seurat)
+library(ggplot2)
+
+# Define output directory (hidden)
+output_dir <- "path/to/output/folder"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Define color palettes for each metadata category
+color_lists <- list(
+  "orig.ident" = c("Bakken" = "#E31A1C", "Gerrits" = "#7D8000", "Hodge" = "#008B45", 
+                    "Leng" = "#0072B2", "OteroGarcia" = "#911EB4"),
+  "region"     = c("M1" = "#D62728", "MTG" = "#8C564B", "OC" = "#2CA02C", 
+                    "OTC" = "#1F77B4", "PFC" = "#9467BD", "SFG" = "#E377C2"),
+  "sex"        = c("F" = "#E41A1C", "M" = "#377EB8"),
+  "pheno"      = c("AD" = "#D62728", "non-AD" = "#1F77B4"),
+  "new_celltype" = c("AST" = "#800000", "ENDO" = "#006400", "EXC" = "#FF0000", "FIB" = "#00008B", 
+                      "INH" = "#4B0082", "MAC" = "#008B8B", "MIC" = "#9400D3", "OLG" = "#C71585", 
+                      "OPC" = "#8B4513", "PER" = "#5F9EA0", "TC" = "#DAA520")
+)
+
+# Loop over categories and save plots
+for (category in names(color_lists)) {
+  p <- DimPlot(seurat_obj, reduction = "harmony.umap", group.by = category, 
+               cols = color_lists[[category]], pt.size = 0.8,
+               label = (category == "new_celltype"), label.size = 5, repel = TRUE) +
+    labs(title = category, x = "UMAP1", y = "UMAP2") +
+    theme_classic() + theme(aspect.ratio = 1)
+  
+  ggsave(file.path(output_dir, paste0(category, "_plot.pdf")), plot = p, width = 7, height = 6)
+}
