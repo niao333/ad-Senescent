@@ -1,1 +1,85 @@
+# Total Up-Regulated Pathways Bar Plot
+library(tidyverse)
+library(readxl)
+
+# Define function labels for clusters
+cluster_functions <- tibble(
+  Cluster = paste("cluster", c(1,9,7,8,14,17,19,5,2,3,15,4,20,11,13,6,10,18,16,12)),
+  Function = c("Mitochondrial respiration / ATP synthesis",
+               "Synaptic Transmission / Vesicle-Mediated Transport",
+               "Vesicle Transport / Membrane Trafficking",
+               "Phospholipid Metabolism / Endocytosis",
+               "Axon guidance / Nervous system development",
+               "Protein folding / Protein catabolic process",
+               "Ribosome biogenesis / rRNA processing",
+               "Ribosome biogenesis / Synapse organization",
+               "Lipid transport / Phospholipid metabolism",
+               "Vitamin transport / Sulfur compound transport",
+               "Angiogenesis / Nervous system development",
+               "ECM organization / MAPK cascade",
+               "Cytoskeleton organization / Neuron development",
+               "Cytoskeleton/actin / Cell junction/adhesion",
+               "Interferon/antiviral / Cytokine signaling",
+               "Immune Response / Cell Activation",
+               "MHC/antigen presentation / Endosome/lysosome",
+               "Immune response / Endocytosis",
+               "Antigen processing and presentation / Viral infection",
+               "T cell activation / Cell adhesion")
+)
+
+# Read and process data
+raw <- read_excel("path/to/total-up-ai-update.xlsx", col_names = FALSE)
+colnames(raw) <- c("Cluster", "EXC_AD", "EXC_AGE", "INH_AD", "INH_AGE", "OLG_AD", "OLG_AGE",
+                   "OPC_AD", "OPC_AGE", "AST_AD", "AST_AGE", "EC_AD", "EC_AGE", "PER_AD", "PER_AGE",
+                   "FIB_AD", "FIB_AGE", "MIC_AD", "MIC_AGE", "MAC_AD", "MAC_AGE", "TC_AD", "TC_AGE")
+
+plot_data <- raw %>%
+  filter(str_detect(Cluster, "^cluster")) %>%
+  mutate(across(-Cluster, as.numeric)) %>%
+  pivot_longer(-Cluster, names_to = "Group", values_to = "Value") %>%
+  separate(Group, into = c("CellType", "Phenotype"), sep = "_") %>%
+  inner_join(cluster_functions, by = "Cluster") %>%
+  mutate(Function_Order = factor(Function, levels = rev(cluster_functions$Function)),
+         Phenotype = factor(Phenotype, levels = c("AD", "AGE")),
+         CellType = factor(CellType, levels = c("EXC","INH","OLG","OPC","AST","EC","PER","FIB","MIC","MAC","TC")))
+
+# Plot
+p <- ggplot(plot_data, aes(x = Value, y = Function_Order, fill = Phenotype)) +
+  geom_col(width = 0.8, position = position_dodge(preserve = "single")) +
+  facet_grid(~ CellType + Phenotype, scales = "free_x", space = "fixed") +
+  scale_x_continuous(limits = c(0, 300), expand = c(0,0)) +
+  scale_fill_manual(values = c("AD" = "#d94f5e", "AGE" = "#f08a30")) +
+  labs(x = "Count", y = NULL, title = "Total Up-Regulated Pathways") +
+  theme_minimal() + theme(axis.text.y = element_text(size = 8), panel.grid.major.y = element_blank())
+print(p)
+
+# Total Down-Regulated Pathways Bar Plot
+
+# Similar structure with down-regulated data
+# (code omitted for brevity, but follows the same pattern)
+
+# EXC and INH Enrichment by Brain Region
+
+# Example for EXC (similar for INH)
+raw_exc <- read_excel("path/to/region_exc.xlsx", col_names = FALSE)
+colnames(raw_exc) <- c("Cluster", "PFC_down", "PFC_up", "SFG_down", "SFG_up", "OC_down", "OC_up", "OTC_down", "OTC_up")
+
+plot_exc <- raw_exc %>%
+  filter(str_detect(Cluster, "^cluster")) %>%
+  mutate(across(-Cluster, as.numeric)) %>%
+  pivot_longer(-Cluster, names_to = "Group", values_to = "Value") %>%
+  separate(Group, into = c("Region", "Direction"), sep = "_") %>%
+  inner_join(cluster_functions, by = "Cluster") %>%
+  mutate(Function_Order = factor(Function, levels = rev(cluster_functions$Function)),
+         Region = factor(Region, levels = c("PFC","SFG","OC","OTC")),
+         Direction = factor(Direction, levels = c("up","down")))
+
+p <- ggplot(plot_exc, aes(x = Value, y = Function_Order, fill = Direction)) +
+  geom_col(width = 0.8, position = position_dodge(preserve = "single")) +
+  facet_grid(~ Region, scales = "free_x", space = "fixed") +
+  scale_x_continuous(limits = c(0, 350), expand = c(0,0)) +
+  scale_fill_manual(values = c("up" = "#d94f5e", "down" = "#2c7bb6")) +
+  labs(x = "Counts", y = NULL, title = "EXC Enrichment by Region") +
+  theme_minimal() + theme(axis.text.y = element_text(size = 8))
+print(p)
 
