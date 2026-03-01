@@ -1,1 +1,111 @@
+# Senescence Score Violin Plot
 
+library(Seurat)
+library(ggplot2)
+
+# Fetch data
+plot_data <- FetchData(seurat_obj, vars = c("new_celltype", "ageing_Score1"))
+
+# Set cell type order
+celltype_order <- c("EXC", "INH", "OLG", "OPC", "AST", "ENDO", "PER", "FIB", "MIC", "MAC", "TC")
+plot_data$new_celltype <- factor(plot_data$new_celltype, levels = celltype_order)
+
+# Define colors (adjust as needed)
+my_colors <- c("EXC" = "#fd4300", "INH" = "#8492b9", "OLG" = "#fd68b5",
+               "OPC" = "#cdfefe", "AST" = "#960264", "MIC" = "#bd3bfa",
+               "ENDO" = "#0ad915", "FIB" = "#56B4E9", "MAC" = "#00BFC4",
+               "PER" = "#CC79A7", "TC" = "#DAA520")
+
+# Violin plot
+p <- ggplot(plot_data, aes(x = new_celltype, y = ageing_Score1, fill = new_celltype)) +
+  geom_violin(trim = FALSE, scale = "width", adjust = 3.5, linewidth = 0.2) +
+  scale_fill_manual(values = my_colors) +
+  labs(y = "Senescence score", x = "") +
+  theme_classic() +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 45, hjust = 1))
+print(p)
+
+# Senescence Score on UMAP 
+
+library(ggrastr)
+
+# Prepare UMAP coordinates and scores
+coords <- as.data.frame(Embeddings(seurat_obj, "harmony.umap"))
+colnames(coords) <- c("UMAP_1", "UMAP_2")
+score <- FetchData(seurat_obj, "ageing_Score1")
+umap_data <- cbind(coords, score) %>% arrange(ageing_Score1)  # order for plotting
+
+# Calculate median positions for labels
+label_data <- umap_data %>%
+  group_by(new_celltype) %>%
+  summarise(UMAP_1 = median(UMAP_1), UMAP_2 = median(UMAP_2))
+
+# Plot with rasterized points
+p <- ggplot(umap_data, aes(x = UMAP_1, y = UMAP_2)) +
+  geom_point_rast(aes(color = ageing_Score1), size = 0.1, alpha = 0.8, raster.dpi = 600) +
+  geom_text(data = label_data, aes(label = new_celltype), color = "black", size = 4.5, fontface = "bold") +
+  scale_color_viridis_c(option = "C", name = "Senescence\nscore") +
+  theme_classic() + labs(x = "UMAP1", y = "UMAP2") + theme(aspect.ratio = 1)
+print(p)
+
+# Percentage of Senescent Cells Bar Plot
+
+# Calculate percentages
+plot_data <- seurat_obj@meta.data %>%
+  group_by(new_celltype) %>%
+  summarise(Percentage = sum(Senescence_Status_0.90 == "Senescent") / n() * 100) %>%
+  mutate(new_celltype = factor(new_celltype, levels = celltype_order))
+
+# Bar plot
+p <- ggplot(plot_data, aes(x = new_celltype, y = Percentage, fill = new_celltype)) +
+  geom_bar(stat = "identity", color = "black", width = 0.7) +
+  scale_fill_manual(values = my_colors) +
+  labs(y = "Percentage of senescent cells (%)", x = "") +
+  scale_y_continuous(expand = c(0,0)) +
+  theme_classic() + theme(legend.position = "none", axis.text.x = element_text(angle = 45, hjust = 1))
+print(p)
+
+# Feature Plots for Senescence Markers
+
+p1 <- FeaturePlot(seurat_obj, features = "CDKN1A", reduction = "harmony.umap",
+                  pt.size = 1.5, order = TRUE, cols = c("lightgrey", "red")) +
+  ggtitle("CDKN1A")
+p2 <- FeaturePlot(seurat_obj, features = "CDKN2A", reduction = "harmony.umap",
+                  pt.size = 1.5, order = TRUE, cols = c("lightgrey", "red")) +
+  ggtitle("CDKN2A")
+print(p1 + p2)
+
+# Boxplot of Senescent Cell Percentage by Group
+
+library(ggpubr)
+
+# Prepare data
+meta <- seurat_obj@meta.data %>%
+  mutate(Is_Senescent = ifelse(Senescence_Status_0.90 == "Senescent", 1, 0),
+         Age_Group = ifelse(age < 75, "<75", ">=75"),
+         Disease = ifelse(pheno %in% c("non-AD","CTL"), "CTL", "AD"))
+
+# Aggregate per sample and cell type (minimum 10 cells)
+stats <- meta %>%
+  group_by(library, new_celltype, Age_Group, Disease) %>%
+  summarise(Total = n(), Senescent = sum(Is_Senescent), .groups = 'drop') %>%
+  filter(Total >= 10) %>%
+  mutate(Percentage = Senescent / Total * 100)
+
+# Function to create boxplot
+plot_box <- function(data, x_var, colors, title) {
+  ggplot(data, aes_string(x = x_var, y = "Percentage", fill = x_var)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+    geom_jitter(width = 0.2, size = 0.5, alpha = 0.5) +
+    facet_wrap(~new_celltype, scales = "free_y", nrow = 1) +
+    stat_compare_means(comparisons = list(unique(data[[x_var]])), method = "wilcox.test", label = "p.format") +
+    scale_fill_manual(values = colors) +
+    labs(y = "Senescent cells (%)", title = title) +
+    theme_classic()
+}
+
+p_age <- plot_box(stats, "Age_Group", c("<75" = "#3498db", ">=75" = "#e74c3c"), "Age Comparison")
+p_disease <- plot_box(stats, "Disease", c("CTL" = "#3498db", "AD" = "#e74c3c"), "Disease Comparison")
+
+# Combine
+print(p_age | p_disease)
